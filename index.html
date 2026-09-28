@@ -219,18 +219,22 @@ let runId = 0;
 
 // --------- map ---------
 const map = L.map('map', {
+  fadeAnimation: false,
   zoomControl: false, attributionControl: true, zoomSnap: 0, worldCopyJump: false,
   minZoom: 1, maxZoom: 16, scrollWheelZoom: true, doubleClickZoom: false, dragging: true, inertia: false
 });
 const esri = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';
 L.tileLayer(esri + 'World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-  attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors', maxZoom: 16, keepBuffer: 6
+  attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors', maxZoom: 16, keepBuffer: 8,
+  updateWhenIdle: false, updateWhenZooming: true, updateInterval: 100
 }).addTo(map);
-L.tileLayer(esri + 'World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { maxZoom: 16, pane: 'overlayPane', keepBuffer: 6 }).addTo(map);
+L.tileLayer(esri + 'World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { maxZoom: 16, pane: 'overlayPane', keepBuffer: 8, updateWhenIdle: false, updateWhenZooming: true, updateInterval: 100 }).addTo(map);
 const layer = L.layerGroup().addTo(map);
 
 // North America + Europe fill the frame for the build-up
 const WIDE_BOUNDS = L.latLngBounds([12, -125], [62, 30]);
+const TOUR_ZOOM = 4.2;
+const FINALE = { center: [28, -55], zoom: 1.95, panEast: [15, 95], panBack: [32, -42] };
 function wideView() { return { center: WIDE_BOUNDS.getCenter(), zoom: map.getBoundsZoom(WIDE_BOUNDS) }; }
 
 const LEAF = 'M20 19.5C15.5 16.5 10.5 14.5 10.5 9.6 10.5 6.6 13 5 15.4 5.5 17.4 5.9 19 7.6 20 9.4 21 7.6 22.6 5.9 24.6 5.5 27 5 29.5 6.6 29.5 9.6 29.5 14.5 24.5 16.5 20 19.5Z';
@@ -386,6 +390,7 @@ const wait = (ms, id) => sleep(ms / pace).then(() => { if (id !== runId) throw '
 
 // --------- the show ---------
 async function play() {
+  if (!tilesReady) return;
   const id = ++runId;
   pace = SPEED;
   audio();
@@ -405,7 +410,7 @@ async function play() {
     for (let k = 0; k < tour.length; k++) {
       const p = PLACES[tour[k]];
       whoosh(1.4 / pace);
-      await flyTo([p[3], p[4]], 4.2, 1.5, id);
+      await flyTo([p[3], p[4]], TOUR_ZOOM, 1.5, id);
       await wait(120, id);
       addPlace(tour[k], { note: SCALE[k * 2], vol: 0.55, card: 'big', life: 1300 / pace });
       await wait(1150, id);
@@ -444,17 +449,17 @@ async function play() {
     chime();
     $('flash').classList.remove('go'); void $('flash').offsetWidth; $('flash').classList.add('go');
     whoosh(1.4 / pace);
-    await flyTo([28, -55], 1.95, 1.4, id);
+    await flyTo(FINALE.center, FINALE.zoom, 1.4, id);
     await wait(250, id);
     whoosh(4 / pace);
-    await panTo([15, 95], 4.2, id);
+    await panTo(FINALE.panEast, 4.2, id);
     await wait(500, id);
     whoosh(2.2 / pace);
-    await panTo([32, -42], 2.4, id);
+    await panTo(FINALE.panBack, 2.4, id);
     $('finale').classList.add('show');
     chime();
   } catch (e) { /* reset pressed mid-run */ }
-  if (id === runId) $('playBtn').disabled = false;
+  if (id === runId) $('playBtn').disabled = !tilesReady;
 }
 
 function reset() {
@@ -468,8 +473,100 @@ function reset() {
   $('finale').classList.remove('show');
   const w = wideView();
   map.setView(w.center, w.zoom, { animate: false });
-  $('playBtn').disabled = false;
+  $('playBtn').disabled = !tilesReady;
 }
+
+// --------- preload every map tile the camera will pass over ---------
+// Traces the exact fly/pan path (same maths Leaflet uses for flyTo) at this screen size,
+// then downloads those tiles up front so nothing is blank while the camera swings around.
+let tilesReady = false;
+const tileKeysLoaded = new Set();
+const tileImgs = [];            // hold references so the browser keeps them in memory
+const TILE_LAYERS = ['World_Light_Gray_Base', 'World_Light_Gray_Reference'];
+
+function addViewTiles(set, center, zoom) {
+  const tz = Math.max(0, Math.min(16, Math.round(zoom)));
+  const scale = Math.pow(2, zoom - tz);
+  const size = map.getSize().divideBy(scale);
+  const c = map.project(L.latLng(center), tz);
+  const n = Math.pow(2, tz);
+  const x0 = Math.floor((c.x - size.x / 2) / 256) - 1, x1 = Math.floor((c.x + size.x / 2) / 256) + 1;
+  const y0 = Math.floor((c.y - size.y / 2) / 256) - 1, y1 = Math.floor((c.y + size.y / 2) / 256) + 1;
+  for (let y = Math.max(0, y0); y <= Math.min(n - 1, y1); y++)
+    for (let x = x0; x <= x1; x++) set.add(tz + '/' + y + '/' + (((x % n) + n) % n));
+}
+function addFlyTiles(set, fromC, fromZ, toC, toZ) {
+  const size = map.getSize(), w0 = Math.max(size.x, size.y);
+  const w1 = w0 * map.getZoomScale(fromZ, toZ);
+  const from = map.project(L.latLng(fromC), fromZ), to = map.project(L.latLng(toC), fromZ);
+  const u1 = to.distanceTo(from) || 1, rho = 1.42, rho2 = rho * rho;
+  const sinh = n => (Math.exp(n) - Math.exp(-n)) / 2, cosh = n => (Math.exp(n) + Math.exp(-n)) / 2, tanh = n => sinh(n) / cosh(n);
+  const r = i => {
+    const s1 = i ? -1 : 1, s2 = i ? w1 : w0, t1 = w1 * w1 - w0 * w0 + s1 * rho2 * rho2 * u1 * u1;
+    const b = t1 / (2 * s2 * rho2 * u1), sq = Math.sqrt(b * b + 1) - b;
+    return sq < 1e-9 ? -18 : Math.log(sq);
+  };
+  const r0 = r(0), S = (r(1) - r0) / rho;
+  const w = s => w0 * (cosh(r0) / cosh(r0 + rho * s));
+  const u = s => w0 * (cosh(r0) * tanh(r0 + rho * s) - sinh(r0)) / rho2;
+  const steps = 60;
+  for (let k = 0; k <= steps; k++) {
+    const sv = S * k / steps;
+    const c = map.unproject(from.add(to.subtract(from).multiplyBy(u(sv) / u1)), fromZ);
+    addViewTiles(set, c, map.getScaleZoom(w0 / w(sv), fromZ));
+  }
+  addViewTiles(set, toC, toZ);
+}
+function addPanTiles(set, fromC, toC, zoom) {
+  const a = map.project(L.latLng(fromC), zoom), b = map.project(L.latLng(toC), zoom);
+  for (let k = 0; k <= 40; k++) addViewTiles(set, map.unproject(a.add(b.subtract(a).multiplyBy(k / 40)), zoom), zoom);
+}
+function cameraTiles() {
+  const set = new Set(), w = wideView();
+  addViewTiles(set, w.center, w.zoom);
+  let cur = { c: w.center, z: w.zoom };
+  TOUR.forEach(([n, c]) => {
+    const p = PLACES[idx(n, c)];
+    addFlyTiles(set, cur.c, cur.z, [p[3], p[4]], TOUR_ZOOM);
+    cur = { c: [p[3], p[4]], z: TOUR_ZOOM };
+  });
+  addFlyTiles(set, cur.c, cur.z, w.center, w.zoom);
+  addFlyTiles(set, w.center, w.zoom, FINALE.center, FINALE.zoom);
+  addPanTiles(set, FINALE.center, FINALE.panEast, FINALE.zoom);
+  addPanTiles(set, FINALE.panEast, FINALE.panBack, FINALE.zoom);
+  return set;
+}
+async function preloadTiles() {
+  tilesReady = false;
+  const btn = $('playBtn'); btn.disabled = true;
+  const keys = [...cameraTiles()].filter(k => !tileKeysLoaded.has(k));
+  const urls = [];
+  keys.forEach(k => { const [z, y, x] = k.split('/'); TILE_LAYERS.forEach(l => urls.push([k, esri + l + '/MapServer/tile/' + z + '/' + y + '/' + x])); });
+  let done = 0, next = 0;
+  const total = urls.length;
+  const label = () => { btn.textContent = total ? 'Loading map ' + Math.round(100 * done / total) + '%' : '▶ Play'; };
+  label();
+  await new Promise(resolve => {
+    if (!total) return resolve();
+    const worker = () => {
+      if (next >= total) return;
+      const [k, url] = urls[next++];
+      const img = new Image();
+      img.onload = img.onerror = () => {
+        tileImgs.push(img); tileKeysLoaded.add(k);
+        done++; label();
+        if (done === total) resolve(); else worker();
+      };
+      img.src = url;
+    };
+    for (let i = 0; i < 8; i++) worker();
+  });
+  tilesReady = true;
+  btn.textContent = '▶ Play';
+  btn.disabled = false;
+}
+let preloadTimer = null;
+function schedulePreload() { clearTimeout(preloadTimer); preloadTimer = setTimeout(preloadTiles, 300); }
 
 // --------- controls ---------
 $('playBtn').onclick = play;
@@ -497,10 +594,11 @@ $('fsBtn').onclick = () => {
   if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
   else (fsEl.requestFullscreen || fsEl.webkitRequestFullscreen).call(fsEl);
 };
-document.addEventListener('fullscreenchange', () => setTimeout(() => { map.invalidateSize(); if (!placed.length) reset(); }, 100));
-window.addEventListener('resize', () => { map.invalidateSize(); if (!placed.length) reset(); });
+document.addEventListener('fullscreenchange', () => setTimeout(() => { map.invalidateSize(); if (!placed.length) { reset(); schedulePreload(); } }, 100));
+window.addEventListener('resize', () => { map.invalidateSize(); if (!placed.length) { reset(); schedulePreload(); } });
 
 reset();
+preloadTiles();
 </script>
 </body>
 </html>
