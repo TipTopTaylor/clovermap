@@ -18,7 +18,7 @@
     --line: #DED8C4;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: #1b2a20; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; touch-action: manipulation; background: #1b2a20; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
 
   /* 9:16 stage, as large as the window allows */
   .stage {
@@ -27,6 +27,8 @@
     transform: translate(-50%, -50%);
     width: min(100vw, 56.25vh);
     height: min(100vh, 177.78vw);
+    width: min(100vw, 56.25dvh);
+    height: min(100dvh, 177.78vw);
     overflow: hidden;
     background: #EEF1E6;
     font-size: min(1.6vh, 2.85vw);
@@ -116,10 +118,19 @@
   @keyframes out { to { transform: translateY(-40%) scale(.9); opacity: 0; } }
 
   /* finale */
-
+  .finale {
+    position: absolute; left: 6%; right: 6%; top: 58%;
+    z-index: 950; text-align: center;
+    background: var(--clover-deep); color: #fff;
+    border-radius: 1.4em; padding: 1.3em 1em 1.2em;
+    box-shadow: 0 1.6em 3em -1.2em rgba(0,0,0,.5);
+    opacity: 0; transform: translateY(30%) scale(.85);
+    pointer-events: none;
+  }
   .finale.show { animation: finIn .7s cubic-bezier(.2,1.5,.4,1) forwards; }
   @keyframes finIn { to { opacity: 1; transform: none; } }
-
+  .finale .big { font-family: 'Fraunces', serif; font-weight: 600; font-size: 2.6em; line-height: 1.1; }
+  .finale .small { font-size: 1.2em; font-weight: 600; color: #CFE0D2; margin-top: .4em; }
 
   .flash { position: absolute; inset: 0; background: #fff; opacity: 0; z-index: 940; pointer-events: none; }
   .flash.go { animation: flash .6s ease-out; }
@@ -140,8 +151,8 @@
   .controls button:hover { background: #24513A; }
   .controls button:disabled { opacity: .45; cursor: default; }
   .controls .tip { color: rgba(255,255,255,.55); font-size: 11px; margin-left: 4px; }
-  body.hide-ui .controls { opacity: 0; }
-  body.hide-ui .controls:hover { opacity: 1; }
+  .controls { flex-wrap: wrap; max-width: calc(100vw - 20px); transition: opacity .25s; }
+  body.hide-ui .controls, body.running .controls { opacity: 0; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -156,7 +167,8 @@
     <option value="2.4">Turbo</option>
   </select>
   <button id="soundBtn">🔊 Sound on</button>
-  <span class="tip">Space = play · R = reset · H = hide buttons</span>
+  <button id="fsBtn">⛶ Fullscreen</button>
+  <span class="tip">Buttons hide when you press Play, then it starts. Double-tap anywhere to bring them back.</span>
 </div>
 
 <div class="stage" id="stage">
@@ -200,6 +212,7 @@ const NEXT = [['London', 'United Kingdom'], ['Knockatallon', 'Ireland'], ['Los A
 const $ = id => document.getElementById(id);
 const idx = (name, country) => PLACES.findIndex(p => p[0] === name && (!country || p[2] === country));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const START_DELAY = 1500; // ms after pressing Play, so the buttons are gone before anything moves
 let SPEED = 1.8;   // opening speed (menu)
 let pace = 1;      // current pace; the flood and finale always run at 1
 let runId = 0;
@@ -207,7 +220,7 @@ let runId = 0;
 // --------- map ---------
 const map = L.map('map', {
   zoomControl: false, attributionControl: true, zoomSnap: 0, worldCopyJump: false,
-  minZoom: 1, maxZoom: 16, scrollWheelZoom: true, dragging: true, inertia: false
+  minZoom: 1, maxZoom: 16, scrollWheelZoom: true, doubleClickZoom: false, dragging: true, inertia: false
 });
 const esri = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';
 L.tileLayer(esri + 'World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
@@ -377,7 +390,10 @@ async function play() {
   pace = SPEED;
   audio();
   $('playBtn').disabled = true;
+  document.body.classList.add('running');
   try {
+    await sleep(START_DELAY);
+    if (id !== runId) throw 'reset';
     const tour = TOUR.map(([n, c]) => idx(n, c)), next = NEXT.map(([n, c]) => idx(n, c));
     const used = new Set([...tour, ...next]);
     const rest = PLACES.map((_, i) => i).filter(i => !used.has(i));
@@ -443,6 +459,7 @@ async function play() {
 
 function reset() {
   runId++;
+  document.body.classList.remove('running');
   map.stop();
   layer.clearLayers(); placed.length = 0;
   clovers = 0; towns = 0; countrySet.clear(); side = 0; slot = 0;
@@ -464,7 +481,23 @@ document.addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); if (!$('playBtn').disabled) play(); }
   if (e.key === 'r' || e.key === 'R') reset();
   if (e.key === 'h' || e.key === 'H') document.body.classList.toggle('hide-ui');
+  if (e.key === 'Escape') showControls();
 });
+function showControls() { document.body.classList.remove('running', 'hide-ui'); }
+document.addEventListener('dblclick', showControls);
+let lastTap = 0;
+document.addEventListener('touchend', e => {
+  if (e.touches.length) return;
+  const now = Date.now();
+  if (now - lastTap < 320) { showControls(); lastTap = 0; } else lastTap = now;
+}, { passive: true });
+const fsEl = document.documentElement;
+if (!(fsEl.requestFullscreen || fsEl.webkitRequestFullscreen)) $('fsBtn').style.display = 'none';
+$('fsBtn').onclick = () => {
+  if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  else (fsEl.requestFullscreen || fsEl.webkitRequestFullscreen).call(fsEl);
+};
+document.addEventListener('fullscreenchange', () => setTimeout(() => { map.invalidateSize(); if (!placed.length) reset(); }, 100));
 window.addEventListener('resize', () => { map.invalidateSize(); if (!placed.length) reset(); });
 
 reset();
